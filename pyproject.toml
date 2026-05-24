@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "x64dbg-mcp-fw"
+version = "0.1.0"
+description = "Host-side MCP framework that drives x64dbg (running in an isolated VM) via the x64dbg-automate ZMQ plugin, and exposes x64dbg-skills as MCP tools."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "viet.doxv" }]
+dependencies = [
+    "mcp[cli]>=1.2",
+    # [mcp] extra pulls the upstream x64dbg-automate-mcp server deps so a single
+    # `uv sync` provisions BOTH MCP servers from one venv (see README).
+    "x64dbg-automate[mcp]>=0.5",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+# Static analysis skills. Install the ones you need.
+decompile = ["angr>=9.2"]
+yara      = ["yara-python>=4.5"]
+pe        = ["lief>=0.14"]
+all       = ["angr>=9.2", "yara-python>=4.5", "lief>=0.14"]
+
+[project.scripts]
+x64dbg-mcp-fw = "x64dbg_mcp_fw.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/x64dbg_mcp_fw"]

@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Claude Code
+.claude/
+
+# Environment / secrets
+.env
+.env.*
+
+# Analysis artifacts (snapshots, memory dumps, reports)
+artifacts/
+snapshots/
+*.bin
+yara_results.json
+diff_report.json
+xrefs.json
+imports.json
+registers.json
+memory_map.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

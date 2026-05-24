@@ -1,0 +1,35 @@
+{
+  "_comment": "Add these two MCP servers to your Claude Code / Claude Desktop config. They are siblings: the upstream one provides debugger primitives; ours adds the higher-level skills. Both target the same x64dbg-automate plugin in the VM.",
+  "mcpServers": {
+    "x64dbg-automate": {
+      "command": "uv",
+      "args": [
+        "run", "--with", "x64dbg-automate[mcp]",
+        "x64dbg-automate-mcp"
+      ],
+      "env": {
+        "X64DBG_PATH": "C:\\\\x64dbg\\\\release\\\\x64\\\\x64dbg.exe"
+      }
+    },
+    "x64dbg-mcp-fw": {
+      "command": "uv",
+      "args": [
+        "run", "--directory", "C:\\\\Users\\\\vietd\\\\Documents\\\\proj\\\\x64_mcp",
+        "x64dbg-mcp-fw"
+      ],
+      "env": {
+        "_note_host": "VM host-only adapter IP. VERIFY 192.168.232.0/24 is the Host-only VMnet, not NAT.",
+        "X64DBG_VM_HOST": "192.168.232.135",
+        "_note_ports": "Must match the x64dbg Automate Settings dialog. REQ/REP=41201, PUB/SUB=41200.",
+        "X64DBG_VM_REQ_PORT": "41201",
+        "X64DBG_VM_PUB_PORT": "41200",
+        "X64DBG_SKILLS_DIR": "C:\\\\Users\\\\vietd\\\\src\\\\x64dbg-skills",
+        "X64DBG_ARTIFACT_DIR": "C:\\\\Users\\\\vietd\\\\Documents\\\\proj\\\\x64_mcp\\\\artifacts",
+        "VMRUN_PATH": "C:\\\\Program Files (x86)\\\\VMware\\\\VMware Workstation\\\\vmrun.exe",
+        "VMX_PATH": "C:\\\\VMs\\\\malware-analysis\\\\malware-analysis.vmx",
+        "VM_GUEST_USER": "analyst",
+        "VM_GUEST_PASS": "REPLACE_ME"
+      }
+    }
+  }
+}

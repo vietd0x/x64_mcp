@@ -1,30 +1,42 @@
 {
-  "_comment": "Add these two MCP servers to your Claude Code / Claude Desktop config. They are siblings: the upstream one provides debugger primitives; ours adds the higher-level skills. Both target the same x64dbg-automate plugin in the VM.",
+  "_comment": "Three MCP servers wired into one Claude config. ida-pro-mcp talks to the IDA plugin on 192.168.131.1:13337 (static analysis). x64dbg-automate-mcp + x64dbg-mcp-fw both talk to the x64dbg-automate plugin on 192.168.131.129 (dynamic analysis). Both upstream plugins bind on their own machines; this config runs the client side wherever Claude lives.",
   "mcpServers": {
+    "ida-pro-mcp": {
+      "_note": "Static analysis. The IDA Pro plugin (ida-pro-mcp) listens on 13337 on the IDA host. ONE-TIME INSTALL on the framework host: `uv tool install git+https://github.com/mrexodia/ida-pro-mcp` \u2014 this puts `ida-pro-mcp` on PATH. The older `uvx --from git+...` form re-fetches the repo on every MCP startup and routinely exceeds Claude's 30 s connect timeout. Inside IDA, run `uvx --from git+https://github.com/mrexodia/ida-pro-mcp ida-pro-mcp --install` once to drop the plugin, then enable 'Allow remote connections' in the plugin's settings so it binds 0.0.0.0:13337 instead of localhost. Upstream auto-discovery only works when IDA runs on the same machine as Claude (it scans local lockfiles under ~/.idapro/mcp/instances/); for cross-host setups you must pass --ida-rpc. Verify the endpoint with `nc -vz 192.168.131.1 13337` (Linux) or `Test-NetConnection 192.168.131.1 -Port 13337` (PowerShell).",
+      "command": "ida-pro-mcp",
+      "args": [
+        "--ida-rpc",
+        "http://192.168.8.101:13337"
+      ]
+    },
     "x64dbg-automate": {
+      "_note": "Low-level debugger primitives (~40 tools: read_memory, set_breakpoint, step_into, etc.). Call connect_remote(host='192.168.131.129', req_port=41201, pub_port=41200) at the start of each session.",
       "command": "uv",
       "args": [
-        "run", "--with", "x64dbg-automate[mcp]",
+        "run",
+        "--with",
+        "x64dbg-automate[mcp]",
         "x64dbg-automate-mcp"
-      ],
-      "env": {
-        "X64DBG_PATH": "C:\\\\x64dbg\\\\release\\\\x64\\\\x64dbg.exe"
-      }
+      ]
     },
     "x64dbg-mcp-fw": {
+      "_note": "High-level skills + VM lifecycle (this repo, ~19 tools). Connects to the same x64dbg-automate plugin via short-lived ZMQ sessions.",
       "command": "uv",
       "args": [
-        "run", "--directory", "C:\\\\Users\\\\vietd\\\\Documents\\\\proj\\\\x64_mcp",
+        "run",
+        "--directory",
+        "/home/v/tools/x64_mcp",
         "x64dbg-mcp-fw"
       ],
       "env": {
-        "_note_host": "VM host-only adapter IP. VERIFY 192.168.232.0/24 is the Host-only VMnet, not NAT.",
-        "X64DBG_VM_HOST": "192.168.232.135",
+        "_note_host": "VM host-only adapter IP (VMnet1). Verify VMnet1 is the host-only network, not NAT.",
+        "X64DBG_VM_HOST": "192.168.131.129",
         "_note_ports": "Must match the x64dbg Automate Settings dialog. REQ/REP=41201, PUB/SUB=41200.",
         "X64DBG_VM_REQ_PORT": "41201",
         "X64DBG_VM_PUB_PORT": "41200",
-        "X64DBG_SKILLS_DIR": "C:\\\\Users\\\\vietd\\\\src\\\\x64dbg-skills",
-        "X64DBG_ARTIFACT_DIR": "C:\\\\Users\\\\vietd\\\\Documents\\\\proj\\\\x64_mcp\\\\artifacts",
+        "X64DBG_SKILLS_DIR": "/home/v/tools/x64_mcp/x64dbg-skills",
+        "X64DBG_ARTIFACT_DIR": "/home/v/tools/x64_mcp/artifacts",
+        "_note_vmrun": "vmrun tools only work when this MCP server runs on the same machine as VMware Workstation. Omit VMRUN_PATH/VMX_PATH if Claude runs on a third host that can't drive the hypervisor.",
         "VMRUN_PATH": "C:\\\\Program Files (x86)\\\\VMware\\\\VMware Workstation\\\\vmrun.exe",
         "VMX_PATH": "C:\\\\VMs\\\\malware-analysis\\\\malware-analysis.vmx",
         "VM_GUEST_USER": "analyst",

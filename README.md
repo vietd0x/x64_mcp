@@ -1,15 +1,23 @@
 # x64dbg-mcp-fw
 
-Host-side **MCP framework** that drives [x64dbg](https://x64dbg.com) running
-inside an **isolated VM** via the
+Client-side **MCP framework** that drives [x64dbg](https://x64dbg.com)
+running inside an **isolated VM** via the
 [x64dbg-automate](https://github.com/dariushoule/x64dbg-automate) ZeroMQ
-plugin, and exposes
-[x64dbg-skills](https://github.com/dariushoule/x64dbg-skills) (decompile,
-state-snapshot, state-diff, YARA, enum-imports, find-xrefs) as MCP tools.
+plugin (dynamic analysis), and pairs it with
+[ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) running on a separate
+IDA Pro host (static analysis). It exposes
+[x64dbg-skills](https://github.com/dariushoule/x64dbg-skills) (state-snapshot,
+state-diff, YARA, enum-imports, find-xrefs, decompile) as MCP tools.
 
-> **TL;DR** — Claude debugs malware for you.  x64dbg runs in a throwaway VM,
-> Claude controls it from the host over ZMQ, and the malware never touches your
-> workstation.
+> **TL;DR** — Claude reverse-engineers malware for you. IDA Pro (with the
+> `ida-pro-mcp` plugin) runs on one machine for static analysis; x64dbg (with
+> `x64dbg-automate`) runs in a throwaway VM for dynamic analysis. Claude talks
+> to both over the network, and the malware never touches your workstation.
+
+> **Reference network layout used throughout this README**
+> - **IDA Pro host** — `192.168.131.1`, `ida-pro-mcp` plugin listening on **TCP 13337**
+> - **x64dbg VM** — `192.168.131.129`, `x64dbg-automate` plugin listening on **TCP 41201 (REQ/REP)** + **41200 (PUB/SUB)**
+> - **Framework host** — anywhere reachable to both of the above (this is where Claude Code / Claude Desktop runs)
 
 ---
 
@@ -18,14 +26,14 @@ state-snapshot, state-diff, YARA, enum-imports, find-xrefs) as MCP tools.
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
-  - [1. VM — VMware Workstation](#1-vm--vmware-workstation)
-  - [2. Host — Python install](#2-host--python-install)
-  - [3. MCP config (Claude Code / Claude Desktop)](#3-mcp-config)
+  - [1. IDA Pro host — ida-pro-mcp plugin](#1-ida-pro-host--ida-pro-mcp-plugin)
+  - [2. x64dbg VM — VMware Workstation](#2-x64dbg-vm--vmware-workstation)
+  - [3. Framework host — Python install](#3-framework-host--python-install)
+  - [4. MCP config (Claude Code / Claude Desktop)](#4-mcp-config)
 - [Quick start](#quick-start)
 - [MCP tool surface](#mcp-tool-surface)
 - [Real-world example: shellcode C2 extraction](#real-world-example)
 - [Troubleshooting](#troubleshooting)
-- [Security notes](#security-notes)
 - [Extending](#extending)
 - [License](#license)
 
@@ -34,74 +42,79 @@ state-snapshot, state-diff, YARA, enum-imports, find-xrefs) as MCP tools.
 ## Architecture
 
 ```
-┌─────────────────── HOST (trusted) ────────────────────┐
-│                                                       │
-│  Claude Code / Claude Desktop                         │
-│    │                                                  │
-│    ├──stdio──► x64dbg-mcp-fw      (this repo)        │
-│    │             19 high-level tools                  │
-│    │             VM lifecycle (vmrun)                  │
-│    │             Snapshot / diff / YARA / decompile    │
-│    │                    │                              │
-│    └──stdio──► x64dbg-automate-mcp (upstream)         │
-│                  ~40 debugger primitives               │
-│                  read_memory, set_breakpoint, step...  │
-│                         │                              │
-│                         │ ZMQ (tcp)                    │
-│                         │ REQ/REP :41201               │
-│                         │ PUB/SUB :41200               │
-│  artifacts/             │                              │
-│    snapshots/           │                              │
-│    reports/             │                              │
-└─────────────────────────┼──────────────────────────────┘
-                          │  host-only network (VMnet1)
-┌─────────────────────────┼──────────────────────────────┐
-│  VM (untrusted)         │                              │
-│                         ▼                              │
-│  x64dbg.exe ─► x64dbg-automate plugin                 │
-│                  binds 0.0.0.0:41201 (REQ/REP)        │
-│                  binds 0.0.0.0:41200 (PUB/SUB)        │
-│                                                       │
-│  malware.exe  ◄── debuggee                            │
-│                                                       │
-│  ❌ No internet   ❌ No LAN access                     │
-│  ✅ Host-only adapter (ZMQ ports only)                 │
-└───────────────────────────────────────────────────────┘
+┌─── IDA Pro host (192.168.131.1) ────┐    ┌─── Framework host (Claude lives here) ─────┐
+│                                     │    │                                            │
+│  IDA Pro 9.x                        │    │  Claude Code / Claude Desktop              │
+│    └─► ida-pro-mcp plugin            │    │     │                                      │
+│         binds 0.0.0.0:13337 (HTTP)  │◄───┼──── stdio ──► ida-pro-mcp                  │
+│         decompile / xrefs / strings │    │     │           (static analysis tools)    │
+│         types / get_function_by_*   │    │     │                                      │
+└─────────────────────────────────────┘    │     ├── stdio ──► x64dbg-mcp-fw (this repo)│
+                                           │     │              ~19 high-level tools    │
+                                           │     │              snapshot / diff / YARA  │
+                                           │     │                                      │
+                                           │     └── stdio ──► x64dbg-automate-mcp      │
+                                           │                    ~40 debugger primitives │
+                                           │                    read_memory / step / go │
+                                           │                       │                    │
+                                           │  artifacts/           │ ZMQ (tcp)          │
+                                           │   snapshots/          │ REQ/REP :41201     │
+                                           │   reports/            │ PUB/SUB :41200     │
+                                           └───────────────────────┼────────────────────┘
+                                                                   │
+                                       ┌─── x64dbg VM (192.168.131.129) ────────────┐
+                                       │                           ▼                │
+                                       │  x64dbg.exe ─► x64dbg-automate plugin     │
+                                       │                  binds 0.0.0.0:41201       │
+                                       │                  binds 0.0.0.0:41200       │
+                                       │                                            │
+                                       │  malware.exe   ◄── debuggee                │
+                                       │                                            │
+                                       │  ❌ No internet   ❌ No LAN access         │
+                                       │  ✅ Host-only adapter (ZMQ ports only)     │
+                                       └────────────────────────────────────────────┘
 ```
 
-### Two-server model
+### Three-server model
 
-| MCP Server | Package | Role |
-|---|---|---|
-| **`x64dbg-automate-mcp`** (upstream) | `x64dbg-automate[mcp]` | Low-level debugger primitives: `read_memory`, `write_memory`, `set_breakpoint`, `disassemble`, `step_into`, `go`, `get_all_registers`, etc. (~40 tools) |
-| **`x64dbg-mcp-fw`** (this repo) | `x64dbg-mcp-fw` | High-level skills + VM lifecycle + orchestration recipes. Wraps snapshot/diff/YARA/decompile and VMware vmrun. (19 tools) |
+| MCP Server | Package | Where it talks | Role |
+|---|---|---|---|
+| **`ida-pro-mcp`** (upstream) | `git+https://github.com/mrexodia/ida-pro-mcp` | `192.168.131.1:13337` (HTTP) | Static analysis: `decompile_function`, `get_xrefs_to`, `list_strings`, `set_function_prototype`, etc. Runs against the IDA database opened in IDA Pro on the analyst's workstation. |
+| **`x64dbg-automate-mcp`** (upstream) | `x64dbg-automate[mcp]` | `192.168.131.129:41201/41200` (ZMQ) | Low-level debugger primitives: `read_memory`, `write_memory`, `set_breakpoint`, `disassemble`, `step_into`, `go`, `get_all_registers`, etc. (~40 tools) |
+| **`x64dbg-mcp-fw`** (this repo) | `x64dbg-mcp-fw` | `192.168.131.129:41201/41200` (ZMQ) | High-level skills + VM lifecycle + orchestration recipes. Wraps snapshot/diff/YARA/decompile and VMware vmrun. (19 tools) |
 
-Both servers connect to the **same** x64dbg-automate ZMQ plugin in the VM via
-`X64DbgClient.connect_remote()`. They share the same venv (one `uv sync`
-installs both).
+The two x64dbg-side servers connect to the **same** x64dbg-automate ZMQ plugin
+in the VM via `X64DbgClient.connect_remote()`. They share the same venv (one
+`uv sync` installs both). The IDA Pro server is independent — it runs as its
+own stdio MCP process and never touches the debug VM.
 
 ### Key design decisions
 
 - **`connect_remote()` only** — the framework never calls `attach_session(pid)`.
-  The MCP server on the host never sees the malware process directly.
+  The MCP server on the framework host never sees the malware process directly.
 - **`detach_session()` on teardown** — only closes the ZMQ socket; x64dbg keeps
   running in the VM. Each MCP tool call opens and closes its own connection.
 - **Stateless tools** — config is loaded from env vars on every call. No
   persistent state between tool invocations.
-- **Static skills run on host** — decompile (angr), YARA, PE analysis all
-  operate on snapshot files pulled to the host. They never execute sample code.
+- **Static skills can run two ways** — `decompile` / `enum_imports` /
+  `find_xrefs` in this repo operate on snapshot files pulled from the VM (no
+  IDA required). When you do have an IDA database open with `ida-pro-mcp`
+  exposed, Claude will usually prefer the IDA tools — they're authoritative.
+  Either path keeps sample code from executing on the framework host.
 
 ---
 
 ## Prerequisites
 
-| Component | Version | Notes |
+| Component | Version | Where |
 |---|---|---|
-| Python | >= 3.10 | On the **host** only |
-| [uv](https://docs.astral.sh/uv/) | latest | Package manager (recommended) |
-| VMware Workstation / Player | 15+ | Or any VMware supporting `vmrun` |
-| x64dbg | latest | Installed **inside the VM** |
-| x64dbg-automate plugin | >= 0.5 | `.dp32` / `.dp64` in x64dbg plugins dir |
+| Python | >= 3.10 | Framework host (where Claude runs) |
+| [uv](https://docs.astral.sh/uv/) | latest | Framework host — package manager |
+| IDA Pro | 8.4+ / 9.x | IDA host (`192.168.131.1`) — needs a paid license; the `ida-pro-mcp` plugin supports both Hex-Rays and the IDA decompiler |
+| [`ida-pro-mcp`](https://github.com/mrexodia/ida-pro-mcp) | latest | Plugin installed into IDA via `uvx --from git+https://github.com/mrexodia/ida-pro-mcp ida-pro-mcp --install`, set to bind `0.0.0.0:13337`. On the framework host, install the client persistently: `uv tool install git+https://github.com/mrexodia/ida-pro-mcp` (avoids per-startup git fetch). |
+| VMware Workstation / Player | 15+ | The hypervisor that hosts the x64dbg VM (any host that can talk to `192.168.131.129`) |
+| x64dbg | latest | Installed **inside the VM** at `192.168.131.129` |
+| x64dbg-automate plugin | >= 0.5 | `.dp32` / `.dp64` in the VM's x64dbg plugins dir |
 | Windows VM | 7 / 10 / 11 | Dedicated malware analysis VM |
 
 Optional (for specific skills):
@@ -117,22 +130,76 @@ Optional (for specific skills):
 
 ## Setup
 
-### 1. VM — VMware Workstation
+### 1. IDA Pro host — `ida-pro-mcp` plugin
+
+This is the machine at **`192.168.131.1`**. It runs IDA Pro with the analyst's
+IDB(s) open and exposes them over HTTP for Claude to query.
+
+1. **Install IDA Pro** (8.4+ recommended for 9.x decompiler features).
+
+2. **Install the `ida-pro-mcp` plugin** into IDA:
+
+   ```powershell
+   # On the IDA host. uvx ships with `uv`.
+   uvx --from git+https://github.com/mrexodia/ida-pro-mcp ida-pro-mcp --install
+   ```
+
+   Restart IDA and confirm the *Edit → Plugins → MCP* menu entry appears.
+
+3. **Bind to all interfaces** so the framework host can reach it. By default
+   the plugin binds `127.0.0.1` only. Either edit the plugin's config or run
+   IDA with the env var set:
+
+   | Plugin setting | Value |
+   |---|---|
+   | Host | **`0.0.0.0`** |
+   | Port | **`13337`** |
+   | Allow remote connections | **enabled** |
+
+   > ⚠️ The IDA MCP plugin executes Python/IDC scripts on whatever IDB is open.
+   > Exposing it to a network means anyone who can reach `13337` can read and
+   > modify your IDBs. Keep it on a trusted VLAN, the same VMnet as the debug
+   > VM, or behind a VPN.
+
+4. **Open your IDB** in IDA and start the plugin: *Edit → Plugins → MCP →
+   Start Server*. The status bar should say `Listening on 0.0.0.0:13337`.
+
+5. Edit `\plugins\ida_mcp\http.py` comment these line
+  ```python
+  # if host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+  #     self.send_error(403, "Invalid Host", host)
+  #     return False
+  ```
+  
+6. **Verify from the framework host**:
+
+   ```bash
+   # Linux/macOS
+   nc -vz 192.168.131.1 13337
+
+   # PowerShell
+   Test-NetConnection -ComputerName 192.168.131.1 -Port 13337
+   ```
+
+### 2. x64dbg VM — VMware Workstation
+This is the machine at **`192.168.131.129`**. It's a throwaway Windows VM
+where the malware actually runs under x64dbg.
 
 1. **Create a Windows VM** dedicated to malware analysis.
    - Disable shared clipboard, drag-and-drop, shared folders.
    - Allocate enough RAM (4 GB+) and disk (60 GB+).
 
-2. **Networking** — set the adapter to **Host-only** (VMnet1):
+2. **Networking** — set the adapter to **Host-only** (VMnet1) and assign
+   **`192.168.131.129`** (static or DHCP-reserved):
    ```
-   VM → Settings → Network Adapter → Host-only
+   VM → Settings → Network Adapter → Host-only (VMnet1)
    ```
    > ⚠️ **Never use NAT or Bridged** for live malware analysis. The malware
    > must not reach the internet or your LAN. Only switch to NAT temporarily
    > if you need to fetch a stage-2 payload from a live C2 (see
    > [Real-world example](#real-world-example)).
 
-   Confirm the VM's IP with `ipconfig` inside the guest (e.g. `192.168.232.135`).
+   Confirm the VM's IP with `ipconfig` inside the guest.
 
 3. **Install x64dbg** in the VM (e.g. `C:\x64dbg`).
 
@@ -152,20 +219,26 @@ Optional (for specific skills):
 
    Restart x64dbg after changing settings.
 
-6. **Verify from host**:
+6. **Verify from the framework host**:
+   ```bash
+   nc -vz 192.168.131.129 41201
+   nc -vz 192.168.131.129 41200
+   ```
    ```powershell
-   # Quick TCP check (PowerShell)
-   Test-NetConnection -ComputerName 192.168.232.135 -Port 41201
-   Test-NetConnection -ComputerName 192.168.232.135 -Port 41200
+   Test-NetConnection -ComputerName 192.168.131.129 -Port 41201
+   Test-NetConnection -ComputerName 192.168.131.129 -Port 41200
    ```
 
 7. **Snapshot** the clean VM state in VMware (`VM → Snapshot → Take Snapshot`).
    Name it `clean` — this is what `prepare_session` reverts to.
 
-### 2. Host — Python install
+### 3. Framework host — Python install
 
-```powershell
-cd C:\Users\you\Documents\proj\x64_mcp
+This is wherever you run Claude Code / Claude Desktop. It needs network
+reachability to **both** `192.168.131.1:13337` and `192.168.131.129:41201/41200`.
+
+```bash
+cd /path/to/x64_mcp
 
 # Install core deps (creates .venv automatically)
 uv sync
@@ -177,65 +250,81 @@ uv pip install ".[pe]"           # enum_imports (lief)
 uv pip install ".[all]"          # everything
 
 # Clone upstream skills scripts (state_diff, yara, etc.)
-git clone https://github.com/dariushoule/x64dbg-skills %USERPROFILE%\src\x64dbg-skills
+git clone https://github.com/dariushoule/x64dbg-skills ~/src/x64dbg-skills
 ```
 
 Verify the MCP server starts:
-```powershell
-uv run x64dbg-mcp-fw 2>&1 | Select-Object -First 1
-# Should print nothing to stdout (stdio transport waits for JSON-RPC)
-# Press Ctrl+C to exit
+```bash
+uv run x64dbg-mcp-fw    # stdio transport — waits for JSON-RPC on stdin
+# Ctrl+C to exit
 ```
 
-### 3. MCP config
+### 4. MCP config
 
 Copy [`examples/claude_mcp_config.json`](examples/claude_mcp_config.json) into
-your Claude Code or Claude Desktop config and edit paths/IP.
+your Claude Code or Claude Desktop config and edit paths/IPs.
 
-**Claude Desktop** (`%APPDATA%\Claude\claude_desktop_config.json`):
+**Claude Desktop** (`%APPDATA%\Claude\claude_desktop_config.json` on Windows,
+`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 
 ```jsonc
 {
   "mcpServers": {
+    // Static analysis (IDA Pro on 192.168.131.1:13337).
+    // Install the client once with: `uv tool install git+https://github.com/mrexodia/ida-pro-mcp`
+    // The older `uvx --from git+...` form re-fetches the repo on every startup
+    // and routinely trips Claude's 30 s MCP connect timeout.
+    "ida-pro-mcp": {
+      "command": "ida-pro-mcp",
+      "args": ["--ida-rpc", "http://192.168.131.1:13337"]
+    },
+    // Low-level debugger primitives (x64dbg-automate at 192.168.131.129)
+    "x64dbg-automate": {
+      "command": "uv",
+      "args": ["run", "--with", "x64dbg-automate[mcp]", "x64dbg-automate-mcp"]
+    },
     // High-level skills + VM lifecycle (this repo)
     "x64dbg-mcp-fw": {
-      "command": "C:\\Users\\you\\.local\\bin\\uv.exe",
+      "command": "uv",
       "args": ["run", "--directory", "C:\\path\\to\\x64_mcp", "x64dbg-mcp-fw"],
       "env": {
-        "X64DBG_VM_HOST":      "192.168.232.135",
+        "X64DBG_VM_HOST":      "192.168.131.129",
         "X64DBG_VM_REQ_PORT":  "41201",
         "X64DBG_VM_PUB_PORT":  "41200",
         "X64DBG_ARTIFACT_DIR": "C:\\path\\to\\x64_mcp\\artifacts",
         "X64DBG_SKILLS_DIR":   "C:\\Users\\you\\src\\x64dbg-skills",
+        // vmrun fields only matter if this MCP server runs on the same
+        // machine as VMware Workstation. Otherwise drop them.
         "VMRUN_PATH":          "C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe",
         "VMX_PATH":            "C:\\VMs\\malware-analysis\\malware-analysis.vmx",
         "VM_GUEST_USER":       "analyst",
         "VM_GUEST_PASS":       "REPLACE_ME"
       }
-    },
-    // Low-level debugger primitives (upstream)
-    "x64dbg-automate": {
-      "command": "C:\\Users\\you\\.local\\bin\\uv.exe",
-      "args": ["run", "--directory", "C:\\path\\to\\x64_mcp", "x64dbg-automate-mcp"]
     }
   }
 }
 ```
 
-**Environment variables reference:**
+**Environment variables reference (`x64dbg-mcp-fw` only — `ida-pro-mcp` has
+its own):**
 
 | Variable | Required | Description | Default |
 |---|---|---|---|
-| `X64DBG_VM_HOST` | ✅ | VM IP on host-only adapter | `127.0.0.1` |
+| `X64DBG_VM_HOST` | ✅ | x64dbg VM IP on host-only adapter | `192.168.131.129` |
 | `X64DBG_VM_REQ_PORT` | | Plugin REQ/REP port | `41201` |
 | `X64DBG_VM_PUB_PORT` | | Plugin PUB/SUB port | `41200` |
-| `X64DBG_ARTIFACT_DIR` | | Where snapshots/reports land on host | `./artifacts` |
+| `X64DBG_ARTIFACT_DIR` | | Where snapshots/reports land on the framework host | `./artifacts` |
 | `X64DBG_SKILLS_DIR` | | Local clone of x64dbg-skills | *(none)* |
-| `X64DBG_PATH` | | x64dbg install path in VM | `C:\x64dbg` |
-| `VMRUN_PATH` | | Full path to `vmrun.exe` | *(auto-detect)* |
+| `X64DBG_PATH` | | x64dbg install path in the VM | `C:\x64dbg` |
+| `VMRUN_PATH` | | Full path to `vmrun.exe` (only if framework runs on the VMware host) | *(auto-detect)* |
 | `VMX_PATH` | | Default `.vmx` for the analysis VM | *(none)* |
 | `VM_GUEST_USER` | | Guest OS account (for copy/run) | *(none)* |
 | `VM_GUEST_PASS` | | Guest OS password | *(none)* |
+
+> The `vm_*` tools shell out to `vmrun`, which only works when this MCP server
+> runs on the **same OS** as VMware Workstation. If your framework host is a
+> third machine, omit `VMRUN_PATH`/`VMX_PATH` and drive the VM by hand (or run
+> `x64dbg-mcp-fw` on the VMware host itself).
 
 ---
 
@@ -244,13 +333,15 @@ your Claude Code or Claude Desktop config and edit paths/IP.
 After setup, the typical analysis session in Claude:
 
 ```
-You:  "Revert VM to clean, load sample.exe, wait for debugger"
+You:  "Open sample.exe in IDA on 192.168.131.1, then revert VM, load it, wait for debugger"
+       → (you load the IDB in IDA Pro manually, plugin auto-starts)
        → Claude calls prepare_session(snapshot_name="clean",
            sample_host_path="C:\\samples\\sample.exe",
            sample_guest_path="C:\\Users\\analyst\\Desktop\\sample.exe")
 
-You:  "Set breakpoint at entry, run to it, disassemble"
-       → Claude uses x64dbg-automate tools: set_breakpoint, go, disassemble
+You:  "Decompile the entry function from IDA, then set a breakpoint at the first call"
+       → Claude calls (ida-pro-mcp) decompile_function(start_ea)
+       → Claude calls (x64dbg-automate) set_breakpoint, go, disassemble
 
 You:  "Take a snapshot before unpacking"
        → Claude calls state_snapshot(name="pre_unpack")
@@ -327,14 +418,15 @@ shellcode sample that connects back to a C2 server.
 
 **Step 1 — Connect and recon:**
 ```
-connect_remote(host="192.168.232.135", req=41201, pub=41200)
+connect_remote(host="192.168.131.129", req=41201, pub=41200)
 get_all_registers  → EIP = 0xD40005 (shellcode entry)
 disassemble 0xD40000, 20  → CLD; CALL 0xD40714 (API resolver)
 ```
 
 **Step 2 — Identify the API resolution pattern:**
 
-IDA Hex-Rays decompilation reveals a classic **PEB walk + ROR13 hash** pattern
+IDA Hex-Rays decompilation (via the `ida-pro-mcp` server at
+`192.168.131.1:13337`) reveals a classic **PEB walk + ROR13 hash** pattern
 (Metasploit / Cobalt Strike style):
 ```c
 // Walk PEB → LDR → InMemoryOrderModuleList
@@ -404,7 +496,7 @@ read_memory(ebx, 4096)  → decoded stage 2 payload header
 
 ## Troubleshooting
 
-### "Resource temporarily unavailable" / connection errors
+### x64dbg side — "Resource temporarily unavailable" / connection errors
 
 - **ZMQ timeout**: the MCP server's ZMQ connection timed out. The upstream
   `x64dbg-automate` MCP server needs `connect_remote` called first.
@@ -413,25 +505,43 @@ read_memory(ebx, 4096)  → decoded stage 2 payload header
 - **Firewall**: Windows Firewall in the VM may block inbound ZMQ. Add a rule
   for ports 41201 and 41200, or disable the firewall in the analysis VM.
 - **Wrong IP**: if you switched from Host-only to NAT (or vice versa), the VM's
-  IP changes. Update `X64DBG_VM_HOST` accordingly.
+  IP changes. Update `X64DBG_VM_HOST` to match `192.168.131.129` (or whatever
+  the VM is on now).
 
-### "Operation cannot be accomplished in current state"
+### x64dbg side — "Operation cannot be accomplished in current state"
 
 The debuggee is running (not paused). Call `pause` first, or wait for a
 breakpoint event.
 
-### ping_vm works but set_breakpoint fails
+### x64dbg side — `ping_vm` works but `set_breakpoint` fails
 
 The upstream `x64dbg-automate-mcp` server requires an explicit
 `connect_remote(host, req_port, pub_port)` call at the start of each session.
 Unlike `x64dbg-mcp-fw` (which connects/disconnects per tool call), the upstream
 server maintains a persistent session.
 
+### IDA side — `ida-pro-mcp` tools time out or refuse to connect
+
+- **Plugin not started**: the IDA plugin doesn't auto-listen on launch. Open
+  IDA, load an IDB, then *Edit → Plugins → MCP → Start Server*.
+- **Bound to 127.0.0.1**: by default the plugin only listens on localhost.
+  Reconfigure it to bind `0.0.0.0:13337` (see [Setup step 1](#1-ida-pro-host--ida-pro-mcp-plugin)).
+- **Firewall on the IDA host**: allow inbound TCP `13337` for the analyst VLAN.
+- **No IDB open**: most tools error with "no database" if you haven't loaded
+  a sample in IDA yet.
+
+### IDA side — tools return data for the wrong binary
+
+The IDA plugin operates on whichever IDB is currently focused in IDA. If you
+have multiple IDBs open, switch to the right tab in IDA before re-running the
+tool. There is no concept of "session" in the plugin — every request reads the
+live state.
+
 ### VM IP changed after switching network adapter
 
 VMware assigns different IPs for Host-only vs NAT:
-- **Host-only** (VMnet1): typically `192.168.232.x` or `192.168.56.x`
-- **NAT** (VMnet8): typically `192.168.140.x`
+- **Host-only** (VMnet1): in this setup, `192.168.131.x`
+- **NAT** (VMnet8): typically `192.168.140.x` (varies)
 
 Update `X64DBG_VM_HOST` or pass the new IP directly to `connect_remote`.
 

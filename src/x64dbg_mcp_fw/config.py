@@ -2,7 +2,9 @@
 
 ZMQ / framework
 ---------------
-X64DBG_VM_HOST          Hostname / IP of the analysis VM (default: 127.0.0.1).
+X64DBG_VM_HOST          Hostname / IP of the analysis VM running x64dbg + the
+                        x64dbg-automate plugin (default: 192.168.131.129 — the
+                        VMnet1 host-only guest in the reference setup).
 X64DBG_VM_REQ_PORT      ZMQ REQ/REP port — must match the plugin's Settings dialog (default: 41201).
 X64DBG_VM_PUB_PORT      ZMQ PUB/SUB port — must match the plugin's Settings dialog (default: 41200).
 X64DBG_SKILLS_DIR       Local clone of github.com/dariushoule/x64dbg-skills. Required
@@ -46,7 +48,7 @@ class Config:
 def load() -> Config:
     skills = os.environ.get("X64DBG_SKILLS_DIR")
     return Config(
-        vm_host=os.environ.get("X64DBG_VM_HOST", "127.0.0.1"),
+        vm_host=os.environ.get("X64DBG_VM_HOST", "192.168.131.129"),
         vm_req_port=int(os.environ.get("X64DBG_VM_REQ_PORT", "41201")),
         vm_pub_port=int(os.environ.get("X64DBG_VM_PUB_PORT", "41200")),
         skills_dir=Path(skills).expanduser().resolve() if skills else None,

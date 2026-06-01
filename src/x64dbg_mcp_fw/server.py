@@ -1,9 +1,11 @@
 """FastMCP server exposing x64dbg-skills as MCP tools.
 
-Connects to a remote x64dbg-automate plugin (default 127.0.0.1:50000/50001).
+Connects to a remote x64dbg-automate plugin (default 192.168.131.129:41201/41200).
 Pair this with the upstream `x64dbg-automate-mcp` server in your MCP config —
 that one exposes the debugger primitives (read_memory, set_breakpoint, ...);
 this one exposes the higher-level skills (snapshot, diff, yara, decompile, ...).
+For static analysis, add `ida-pro-mcp` as a third MCP server pointing at the
+IDA Pro plugin (default 192.168.131.1:13337) — see README for details.
 """
 
 from __future__ import annotations
